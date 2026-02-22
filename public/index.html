@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Student Group Network</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>* { box-sizing: border-box; margin: 0; padding: 0; } body { overflow: hidden; }</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const C = {
+  bg: "#0f172a", panel: "#1e293b", border: "#334155",
+  person: "#3b82f6", group: "#10b981", groupLight: "#6ee7b7",
+  edge: "#475569", text: "#f1f5f9", textDim: "#94a3b8",
+  accent: "#f59e0b", danger: "#ef4444",
+  projP: "#60a5fa", projG: "#34d399"
+};
+
+const EMPTY = () => ({ people: [], groups: [], memberships: [] });
+const BASE = "";
+
+async function createRoom() {
+  const res = await fetch(`${BASE}/api/room`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(EMPTY())
+  });
+  if (!res.ok) throw new Error("Failed to create room");
+  const { id } = await res.json();
+  return id;
+}
+async function loadRoom(id) {
+  const res = await fetch(`${BASE}/api/room/${id}`);
+  if (!res.ok) throw new Error("Room not found");
+  return res.json();
+}
+async function saveRoom(id, data) {
+  await fetch(`${BASE}/api/room/${id}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  });
+}
+
+function ForceGraph({ nodes, links, width, height, onNodeClick, label }) {
+  const svgRef = useRef();
+  const prevNodes = useRef([]);
+  useEffect(() => {
+    const svg = d3.select(svgRef.current);
+    svg.selectAll("*").remove();
+    if (!width || !height) return;
+    if (nodes.length === 0) {
+      svg.append("text").attr("x", width/2).attr("y", height/2)
+        .attr("text-anchor","middle").attr("fill",C.textDim).attr("font-size",13).text("No data yet");
+      return;
+    }
+    const sNodes = nodes.map(n => {
+      const old = prevNodes.current.find(o => o.id === n.id);
+      return old ? { ...n, x: old.x, y: old.y, vx: old.vx, vy: old.vy } : { ...n };
+    });
+    prevNodes.current = sNodes;
+    const sLinks = links.map(l => ({ source: l.source, target: l.target, weight: l.weight||1, color: l.color||C.edge }));
+    const sim = d3.forceSimulation(sNodes)
+      .force("link", d3.forceLink(sLinks).id(d=>d.id).distance(d=>80/(d.weight||1)))
+      .force("charge", d3.forceManyBody().strength(-150))
+      .force("center", d3.forceCenter(width/2, height/2))
+      .force("collision", d3.forceCollide().radius(35))
+      .alphaDecay(0.15).velocityDecay(0.6).alphaMin(0.01);
+    const g = svg.append("g");
+    svg.call(d3.zoom().scaleExtent([0.3,3]).on("zoom", e => g.attr("transform", e.transform)));
+    const link = g.append("g").selectAll("line").data(sLinks).join("line")
+      .attr("stroke", d=>d.color).attr("stroke-width", d=>Math.min(d.weight*1.5,6)).attr("stroke-opacity",0.5);
+    const node = g.append("g").selectAll("g").data(sNodes).join("g")
+      .style("cursor", d=>d.clickable?"pointer":"default")
+      .on("click", (e,d) => { if (onNodeClick && d.clickable) onNodeClick(d); });
+    node.each(function(d) {
+      const el = d3.select(this);
+      if (d.shape === "rect") {
+        el.append("rect").attr("width",80).attr("height",32).attr("rx",6).attr("x",-40).attr("y",-16)
+          .attr("fill",d.color||C.group).attr("stroke",d.clickable?C.accent:"none")
+          .attr("stroke-width",2).attr("stroke-dasharray",d.clickable?"4,2":"none");
+      } else {
+        el.append("circle").attr("r",18).attr("fill",d.color||C.person).attr("stroke","#fff").attr("stroke-width",1.5);
+      }
+      el.append("text").text(d.label.length>10?d.label.slice(0,9)+"…":d.label)
+        .attr("text-anchor","middle").attr("dy",4).attr("fill","#fff").attr("font-size",11).attr("font-weight",500).attr("pointer-events","none");
+    });
+    node.call(d3.drag()
+      .on("start",(e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on("drag",(e,d)=>{ d.fx=e.x; d.fy=e.y; })
+      .on("end",(e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+    sim.on("tick",()=>{
+      const pad=40;
+      sNodes.forEach(d=>{ d.x=Math.max(pad,Math.min(width-pad,d.x)); d.y=Math.max(pad,Math.min(height-pad,d.y)); });
+      link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+      node.attr("transform",d=>`translate(${d.x},${d.y})`);
+    });
+    return () => sim.stop();
+  }, [nodes, links, width, height]);
+  return (
+    <div style={{ position:"relative", width, height }}>
+      {label && <div style={{ position:"absolute",top:6,left:10,color:C.textDim,fontSize:11,fontWeight:600,letterSpacing:1,textTransform:"uppercase",zIndex:2 }}>{label}</div>}
+      <svg ref={svgRef} width={width} height={height} style={{ background:C.panel,borderRadius:8,border:`1px solid ${C.border}` }} />
+    </div>
+  );
+}
+
+function UserSwitcher({ user, data, onSwitch, onAdd, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const ref = useRef();
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAdding(false); } };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+  const handleAdd = () => {
+    const n = newName.trim(); if (!n) return;
+    onAdd(n); setNewName(""); setAdding(false); setOpen(false);
+  };
+  return (
+    <div ref={ref} style={{ position:"relative" }}>
+      <div onClick={()=>setOpen(!open)} style={{ display:"flex",alignItems:"center",gap:6,cursor:"pointer",padding:"4px 10px",borderRadius:8,background:open?C.border:"transparent" }}>
+        <div style={{ width:26,height:26,borderRadius:"50%",background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:C.bg }}>{user.name[0].toUpperCase()}</div>
+        <span style={{ color:C.text,fontSize:13,fontWeight:500 }}>{user.name}</span>
+        <span style={{ color:C.textDim,fontSize:10 }}>▼</span>
+      </div>
+      {open && (
+        <div style={{ position:"absolute",top:"100%",right:0,marginTop:6,background:C.panel,border:`1px solid ${C.border}`,borderRadius:10,width:220,boxShadow:"0 8px 30px rgba(0,0,0,.5)",zIndex:100,overflow:"hidden" }}>
+          <div style={{ padding:"8px 12px",borderBottom:`1px solid ${C.border}`,color:C.textDim,fontSize:11,fontWeight:600,textTransform:"uppercase" }}>Switch User</div>
+          <div style={{ maxHeight:200,overflowY:"auto" }}>
+            {data.people.map(p=>(
+              <div key={p.id} style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 12px",cursor:"pointer",background:p.id===user.id?C.accent+"22":"transparent" }}
+                onMouseEnter={e=>{ if(p.id!==user.id) e.currentTarget.style.background=C.border; }}
+                onMouseLeave={e=>{ e.currentTarget.style.background=p.id===user.id?C.accent+"22":"transparent"; }}>
+                <div style={{ display:"flex",alignItems:"center",gap:8,flex:1 }} onClick={()=>{ onSwitch(p); setOpen(false); }}>
+                  <div style={{ width:22,height:22,borderRadius:"50%",background:p.id===user.id?C.accent:C.person,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff" }}>{p.name[0].toUpperCase()}</div>
+                  <span style={{ color:C.text,fontSize:13 }}>{p.name}</span>
+                  {p.id===user.id && <span style={{ color:C.accent,fontSize:10 }}>● active</span>}
+                </div>
+                {data.people.length>1 && (
+                  <span onClick={e=>{ e.stopPropagation(); onDelete(p); }} style={{ color:C.danger,cursor:"pointer",fontSize:14,fontWeight:700,padding:"0 4px",opacity:0.6 }}
+                    onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=0.6}>×</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ borderTop:`1px solid ${C.border}`,padding:"6px 12px" }}>
+            {!adding ? (
+              <div onClick={()=>setAdding(true)} style={{ color:C.person,fontSize:13,cursor:"pointer",fontWeight:500,padding:"4px 0",display:"flex",alignItems:"center",gap:6 }}>
+                <span style={{ fontSize:16 }}>+</span> Add new person
+              </div>
+            ) : (
+              <div style={{ display:"flex",gap:4 }}>
+                <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleAdd()} placeholder="Name…" autoFocus
+                  style={{ flex:1,padding:"5px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:12,outline:"none" }} />
+                <button onClick={handleAdd} style={{ padding:"5px 10px",borderRadius:6,background:C.person,color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer" }}>Add</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Lobby({ onReady }) {
+  const [mode, setMode] = useState(null);
+  const [nameIn, setNameIn] = useState("");
+  const [codeIn, setCodeIn] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const handleCreate = async () => {
+    const name = nameIn.trim(); if (!name) return;
+    setLoading(true); setErr(null);
+    try {
+      const roomId = await createRoom();
+      const data = EMPTY();
+      const person = { id: "p_" + Date.now(), name };
+      data.people.push(person);
+      await saveRoom(roomId, data);
+      onReady({ roomId, user: person, data });
+    } catch (e) { setErr("Could not create room: " + e.message); setLoading(false); }
+  };
+
+  const handleJoin = async () => {
+    const name = nameIn.trim(); const code = codeIn.trim(); if (!name || !code) return;
+    setLoading(true); setErr(null);
+    try {
+      let data = await loadRoom(code);
+      let person = data.people.find(p => p.name.toLowerCase() === name.toLowerCase());
+      if (!person) { person = { id: "p_" + Date.now(), name }; data.people.push(person); await saveRoom(code, data); }
+      onReady({ roomId: code, user: person, data });
+    } catch (e) { setErr("Room not found. Double-check the code."); setLoading(false); }
+  };
+
+  return (
+    <div style={{ minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif" }}>
+      <div style={{ background:C.panel,borderRadius:16,padding:"44px 40px",border:`1px solid ${C.border}`,textAlign:"center",maxWidth:420,width:"100%" }}>
+        <div style={{ fontSize:40,marginBottom:8 }}>🌐</div>
+        <h1 style={{ color:C.text,fontSize:22,margin:"0 0 6px" }}>Student Group Network</h1>
+        <p style={{ color:C.textDim,fontSize:14,margin:"0 0 28px" }}>Share the room code with others to collaborate</p>
+        {!mode && (
+          <div style={{ display:"flex",gap:10,justifyContent:"center" }}>
+            <button onClick={()=>setMode("create")} style={{ padding:"12px 24px",borderRadius:10,background:C.person,color:"#fff",border:"none",fontWeight:700,cursor:"pointer",fontSize:15 }}>Create Room</button>
+            <button onClick={()=>setMode("join")} style={{ padding:"12px 24px",borderRadius:10,background:C.group,color:"#fff",border:"none",fontWeight:700,cursor:"pointer",fontSize:15 }}>Join Room</button>
+          </div>
+        )}
+        {mode && (
+          <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+            <input value={nameIn} onChange={e=>setNameIn(e.target.value)} placeholder="Your name…"
+              style={{ padding:"10px 14px",borderRadius:8,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:15,outline:"none" }} />
+            {mode==="join" && (
+              <input value={codeIn} onChange={e=>setCodeIn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleJoin()} placeholder="Paste room code…"
+                style={{ padding:"10px 14px",borderRadius:8,border:`1px solid ${C.border}`,background:C.bg,color:C.text,fontSize:15,outline:"none",fontFamily:"monospace" }} />
+            )}
+            {err && <div style={{ color:C.danger,fontSize:13 }}>{err}</div>}
+            <div style={{ display:"flex",gap:8 }}>
+              <button onClick={()=>{ setMode(null); setErr(null); }} style={{ flex:1,padding:"10px",borderRadius:8,background:"transparent",color:C.textDim,border:`1px solid ${C.border}`,cursor:"pointer",fontSize:14 }}>Back</button>
+              <button onClick={mode==="create"?handleCreate:handleJoin} disabled={loading}
+                style={{ flex:2,padding:"10px",borderRadius:8,background:mode==="create"?C.person:C.group,color:"#fff",border:"none",fontWeight:700,cursor:loading?"default":"pointer",fontSize:15,opacity:loading?0.7:1 }}>
+                {loading?"Loading…":mode==="create"?"Create & Enter":"Join"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [session, setSession] = useState(null);
+  const [data, setData] = useState(EMPTY());
+  const [user, setUser] = useState(null);
+  const [roomId, setRoomId] = useState(null);
+  const [groupIn, setGroupIn] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const mainRef = useRef();
+  const [dims, setDims] = useState({ w:0, h:0 });
+
+  const flash = (t, type="info") => { setMsg({t,type}); setTimeout(()=>setMsg(null),2500); };
+
+  const onReady = ({ roomId: rid, user: u, data: d }) => {
+    setRoomId(rid); setUser(u); setData(d); setSession(true);
+  };
+
+  useEffect(() => {
+    const m = () => { if (mainRef.current) setDims({ w:mainRef.current.offsetWidth, h:mainRef.current.offsetHeight }); };
+    m(); window.addEventListener("resize", m);
+    return () => window.removeEventListener("resize", m);
+  }, [session]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    const iv = setInterval(async () => {
+      try { const d = await loadRoom(roomId); setData(d); } catch {}
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [roomId]);
+
+  const mutate = async (fn) => {
+    const d = await loadRoom(roomId);
+    fn(d);
+    await saveRoom(roomId, d);
+    setData({...d});
+  };
+
+  const switchUser = p => { setUser(p); flash(`Switched to ${p.name}`); };
+
+  const addPerson = async name => {
+    let newUser;
+    await mutate(d => {
+      let p = d.people.find(x => x.name.toLowerCase()===name.toLowerCase());
+      if (!p) { p = { id:"p_"+Date.now(), name }; d.people.push(p); }
+      newUser = p;
+    });
+    setUser(newUser);
+  };
+
+  const deletePerson = async p => {
+    let nextUser = null;
+    await mutate(d => {
+      d.people = d.people.filter(x=>x.id!==p.id);
+      d.memberships = d.memberships.filter(m=>m.personId!==p.id);
+      nextUser = d.people[0] || null;
+    });
+    if (user?.id===p.id) { if (nextUser) setUser(nextUser); else { setSession(null); setRoomId(null); setUser(null); } }
+    flash(`Deleted ${p.name}`, "warn");
+  };
+
+  const addGroup = async () => {
+    const name = groupIn.trim(); if (!name||!user) return;
+    await mutate(d => {
+      let g = d.groups.find(x=>x.name.toLowerCase()===name.toLowerCase());
+      if (!g) { g={ id:"g_"+Date.now(), name }; d.groups.push(g); }
+      if (!d.memberships.some(m=>m.personId===user.id&&m.groupId===g.id)) d.memberships.push({ personId:user.id, groupId:g.id });
+    });
+    flash(`Joined "${name}"!`); setGroupIn("");
+  };
+
+  const joinGroup = async gid => {
+    await mutate(d => { if (!d.memberships.some(m=>m.personId===user.id&&m.groupId===gid)) d.memberships.push({ personId:user.id, groupId:gid }); });
+    flash("Joined group!");
+  };
+
+  const leaveGroup = async gid => {
+    const gname = data.groups.find(g=>g.id===gid)?.name;
+    await mutate(d => { d.memberships = d.memberships.filter(m=>!(m.personId===user.id&&m.groupId===gid)); });
+    flash(`Left "${gname}"`, "warn");
+  };
+
+  const handleReset = async () => {
+    if (!confirmReset) { setConfirmReset(true); setTimeout(()=>setConfirmReset(false),3000); return; }
+    await saveRoom(roomId, EMPTY());
+    setData(EMPTY()); setUser(null); setRoomId(null); setSession(null); setConfirmReset(false);
+  };
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(roomId).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false),2000); });
+  };
+
+  if (!session || !user) return <Lobby onReady={onReady} />;
+
+  const biNodes = [
+    ...data.people.map(p=>({ id:p.id,label:p.name,shape:"circle",color:p.id===user?.id?C.accent:C.person })),
+    ...data.groups.map(g=>{ const mine=user&&data.memberships.some(m=>m.personId===user.id&&m.groupId===g.id); return { id:g.id,label:g.name,shape:"rect",color:mine?C.groupLight:C.group,clickable:!mine }; })
+  ];
+  const biLinks = data.memberships.map(m=>({ source:m.personId,target:m.groupId,weight:1,color:m.personId===user?.id?C.accent:C.edge }));
+
+  const ppLinks = [];
+  for (const p1 of data.people) {
+    const g1 = new Set(data.memberships.filter(m=>m.personId===p1.id).map(m=>m.groupId));
+    for (const p2 of data.people) {
+      if (p1.id>=p2.id) continue;
+      const shared = data.memberships.filter(m=>m.personId===p2.id&&g1.has(m.groupId)).length;
+      if (shared>0) ppLinks.push({ source:p1.id,target:p2.id,weight:shared,color:C.projP });
+    }
+  }
+  const ppNodes = data.people.map(p=>({ id:p.id,label:p.name,shape:"circle",color:p.id===user?.id?C.accent:C.person }));
+
+  const gpLinks = [];
+  for (const g1 of data.groups) {
+    const p1 = new Set(data.memberships.filter(m=>m.groupId===g1.id).map(m=>m.personId));
+    for (const g2 of data.groups) {
+      if (g1.id>=g2.id) continue;
+      const shared = data.memberships.filter(m=>m.groupId===g2.id&&p1.has(m.personId)).length;
+      if (shared>0) gpLinks.push({ source:g1.id,target:g2.id,weight:shared,color:C.projG });
+    }
+  }
+  const gpNodes = data.groups.map(g=>({ id:g.id,label:g.name,shape:"rect",color:C.group }));
+
+  const halfW = Math.floor((dims.w-12)/2);
+  const halfH = Math.floor(dims.h/2);
+  const biGraphH = dims.h-110;
+  const myGroups = user ? data.memberships.filter(m=>m.personId===user.id).map(m=>data.groups.find(g=>g.id===m.groupId)).filter(Boolean) : [];
+
+  return (
+    <div style={{ width:"100vw",height:"100vh",background:C.bg,fontFamily:"system-ui,sans-serif",display:"flex",flexDirection:"column",overflow:"hidden" }}>
+      {msg && <div style={{ position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:999,background:msg.type==="warn"?C.danger:C.person,color:"#fff",padding:"8px 20px",borderRadius:8,fontSize:14,fontWeight:500,boxShadow:"0 4px 20px rgba(0,0,0,.4)" }}>{msg.t}</div>}
+      <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 16px",borderBottom:`1px solid ${C.border}`,flexShrink:0 }}>
+        <div style={{ display:"flex",alignItems:"center",gap:10 }}>
+          <span style={{ fontSize:20 }}>🌐</span>
+          <span style={{ color:C.text,fontWeight:700,fontSize:15 }}>Student Group Network</span>
+          <div style={{ display:"flex",alignItems:"center",gap:6,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"3px 10px" }}>
+            <span style={{ color:C.textDim,fontSize:11 }}>Room:</span>
+            <span style={{ color:C.accent,fontSize:12,fontFamily:"monospace",letterSpacing:1 }}>{roomId}</span>
+            <button onClick={copyCode} style={{ padding:"2px 8px",borderRadius:5,background:copied?C.group:C.border,color:copied?"#fff":C.text,border:"none",fontSize:10,cursor:"pointer",fontWeight:600 }}>
+              {copied?"Copied!":"Copy"}
+            </button>
+          </div>
+        </div>
+        <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+          <div style={{ display:"flex",alignItems:"center",gap:14,fontSize:11,color:C.textDim }}>
+            <span style={{ display:"flex",alignItems:"center",gap:4 }}><span style={{ width:8,height:8,borderRadius:"50%",background:C.person,display:"inline-block" }} /> Person</span>
+            <span style={{ display:"flex",alignItems:"center",gap:4 }}><span style={{ width:8,height:8,borderRadius:"50%",background:C.accent,display:"inline-block" }} /> You</span>
+            <span style={{ display:"flex",alignItems:"center",gap:4 }}><span style={{ width:12,height:8,borderRadius:2,background:C.group,display:"inline-block" }} /> Group</span>
+            <span>Drag • Scroll to zoom</span>
+          </div>
+          <div style={{ width:1,height:20,background:C.border }} />
+          <button onClick={handleReset} style={{ padding:"5px 12px",borderRadius:6,background:confirmReset?C.danger:"transparent",color:confirmReset?"#fff":C.danger,border:`1px solid ${confirmReset?C.danger:C.danger+"44"}`,fontSize:12,cursor:"pointer",fontWeight:500 }}>
+            {confirmReset?"Confirm Erase?":"Reset All"}
+          </button>
+          <div style={{ width:1,height:20,background:C.border }} />
+          <UserSwitcher user={user} data={data} onSwitch={switchUser} onAdd={addPerson} onDelete={deletePerson} />
+        </div>
+      </div>
+      <div ref={mainRef} style={{ display:"flex",flex:1,gap:8,padding:8,overflow:"hidden" }}>
+        <div style={{ width:"50%",display:"flex",flexDirection:"column",gap:6 }}>
+          <ForceGraph nodes={biNodes} links={biLinks} width={halfW} height={biGraphH} onNodeClick={d=>{ if(d.clickable) joinGroup(d.id); }} label="Bipartite Network — click a group to join" />
+          <div style={{ display:"flex",gap:5,flexWrap:"wrap",minHeight:28 }}>
+            {myGroups.map(g=>(
+              <div key={g.id} style={{ display:"flex",alignItems:"center",gap:4,background:C.group+"33",border:`1px solid ${C.group}`,borderRadius:6,padding:"2px 10px",fontSize:11,color:C.groupLight }}>
+                {g.name}
+                <span onClick={()=>leaveGroup(g.id)} style={{ cursor:"pointer",marginLeft:3,color:C.danger,fontWeight:700,fontSize:13 }}>×</span>
+              </div>
+            ))}
+            {myGroups.length===0 && <span style={{ color:C.textDim,fontSize:11 }}>No groups yet — add one below or click a group in the graph</span>}
+          </div>
+          <div style={{ display:"flex",gap:6 }}>
+            <input value={groupIn} onChange={e=>setGroupIn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addGroup()} placeholder="Add a group, org, club, or event…"
+              style={{ flex:1,padding:"8px 12px",borderRadius:8,border:`1px solid ${C.border}`,background:C.panel,color:C.text,fontSize:13,outline:"none" }} />
+            <button onClick={addGroup} style={{ padding:"8px 16px",borderRadius:8,background:C.group,color:"#fff",border:"none",fontWeight:600,cursor:"pointer",fontSize:13,whiteSpace:"nowrap" }}>+ Add & Join</button>
+          </div>
+        </div>
+        <div style={{ width:"50%",display:"flex",flexDirection:"column",gap:8 }}>
+          <ForceGraph nodes={ppNodes} links={ppLinks} width={halfW} height={halfH-8} label="People Projection (shared groups → edge)" />
+          <ForceGraph nodes={gpNodes} links={gpLinks} width={halfW} height={halfH-8} label="Group Projection (shared people → edge)" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
